@@ -1,0 +1,11 @@
+# raw SKAB data is downloaded by the notebook (see README)
+data/
+# local working files, not part of the submission
+_dev/
+industrial_sensor_anomaly_detection_project_plan.md
+presentation.pptx
+notebook/.ipynb_checkpoints/
+__pycache__/
+*.pyc
+results/scores.csv
+results/scores_uni.csv

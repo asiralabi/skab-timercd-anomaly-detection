@@ -1,0 +1,6 @@
+variant,mean_auc,median_auc,min_auc,experiments_below_0.6
+Time-RCD multivariate (used),0.709,0.776,0.209,11
+"Time-RCD multivariate, 120 s moving average",0.71,0.798,0.055,12
+"Time-RCD univariate, mean of 8 channels",0.651,0.668,0.268,14
+Isolation Forest (fit on anomaly-free),0.555,0.509,0.08,27
+"Rolling z-score, 60 s window",0.545,0.545,0.455,32
