@@ -7,5 +7,3 @@ presentation.pptx
 notebook/.ipynb_checkpoints/
 __pycache__/
 *.pyc
-results/scores.csv
-results/scores_uni.csv
