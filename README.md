@@ -20,6 +20,7 @@ not just *when* they usually happen.
 ```
 ├── README.md
 ├── requirements.txt
+├── data/skab/               # the 35 SKAB recordings (CSV), from github.com/waico/SKAB, GPL-3.0
 ├── notebook/
 │   └── project.ipynb        # everything: download → EDA → preprocessing → 3 models → evaluation → examples → conclusion
 ├── results/
@@ -151,9 +152,9 @@ pip install -r requirements.txt
 jupyter nbconvert --to notebook --execute --inplace notebook/project.ipynb
 ```
 
-Or open `notebook/project.ipynb` in Jupyter or VS Code and click **Run All**. The notebook downloads the data and the
-model (445 MB) by itself. It takes about 10 minutes on a laptop CPU; no GPU is needed. Tested with Python 3.14 on
-Windows 11.
+Or open `notebook/project.ipynb` in Jupyter or VS Code and click **Run All**. The SKAB data is already in `data/skab/`
+(the notebook downloads any missing file), and the model (445 MB) downloads by itself on the first run. It takes
+about 10 minutes on a laptop CPU; no GPU is needed. Tested with Python 3.14 on Windows 11.
 
 ## References
 
