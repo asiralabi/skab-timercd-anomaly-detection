@@ -1,185 +1,162 @@
-# Industrial Sensor Anomaly Detection Using Time-RCD
+# Finding Machine Faults in Sensor Data with a Hugging Face Model
 
-Final project for *Applied AI with Hugging Face*. Zero-shot anomaly detection on the
-[SKAB](https://github.com/waico/SKAB) industrial water-circulation dataset using the pretrained
-Hugging Face model [thu-sail-lab/Time-RCD](https://huggingface.co/thu-sail-lab/Time-RCD).
+Final project for *Applied AI with Hugging Face*.
 
-**Research question.** Can a pretrained zero-shot time-series foundation model detect the labeled fault
-periods in SKAB without any training on SKAB, and how does it compare with simple classical baselines?
+A water pump test rig is watched by 8 sensors. When something goes wrong (a valve closes, a leak, a shaking rotor),
+the sensor readings start to look unusual. This project uses the pretrained Hugging Face model
+[thu-sail-lab/Time-RCD](https://huggingface.co/thu-sail-lab/Time-RCD) to mark every second that looks like a fault,
+on the public [SKAB](https://github.com/waico/SKAB) dataset.
 
-**Short answer.** Yes, partly. Time-RCD clearly beats Isolation Forest and a rolling z-score
-(mean per-experiment ROC-AUC 0.71 vs 0.55), but its reliability varies a lot between experiments and it
-misses subtle faults. On 24 held-out test experiments it reaches F1 0.60 with recall 0.90 and precision 0.46.
+**Research question.** Can a pretrained Hugging Face model find the faults, and does fine-tuning it on our own data
+make it better?
 
-## Repository structure
+**Short answer.** Yes, and yes. Used as it is (zero-shot), Time-RCD already beats a classic Isolation Forest
+(ROC-AUC 0.74 vs 0.61). After fine-tuning on only 10 labeled recordings (about 6 minutes on a laptop CPU) it reaches
+**F1 0.90 and ROC-AUC 0.97** on 24 unseen test recordings. A sanity check shows that it learned what faults look like,
+not just *when* they usually happen.
+
+## What is in this repository
 
 ```
 ├── README.md
 ├── requirements.txt
 ├── notebook/
-│   └── project.ipynb        # full pipeline: download → EDA → scoring → evaluation → comparison
+│   └── project.ipynb        # everything: download → EDA → preprocessing → 3 models → evaluation → examples → conclusion
 ├── results/
-│   ├── figures/             # fig1–fig5 (produced by the notebook)
-│   ├── evaluation.csv       # per-experiment test metrics + pooled test row
-│   └── comparison.csv       # baseline / variant comparison (mean per-experiment ROC-AUC)
-└── presentation.pdf
+│   ├── figures/             # fig1–fig6, made by the notebook
+│   ├── comparison.csv       # main results: the 3 models on the test set
+│   ├── evaluation.csv       # ROC-AUC of every model on every test recording
+│   ├── clock_check.csv      # the sanity check (step 7 of the notebook)
+│   └── examples.csv         # the five example seconds
+└── presentation.pdf         # PDF export of notebook/project.ipynb (code, outputs and the final conclusion)
 ```
 
-The raw data (`data/`) and the per-row score files (`results/scores*.csv`) are not committed; the notebook
-downloads and regenerates them.
+## 1. The data: SKAB
 
-## Dataset: SKAB
+SKAB (Skoltech Anomaly Benchmark) has recordings from a real water-circulation rig with a pump, a valve and a tank.
+Each recording runs normally for a while, then one fault is made on purpose. Each row is one second.
 
-SKAB (Skoltech Anomaly Benchmark) contains multivariate sensor recordings from an experimental water
-circulation rig with a pump, a valve and a tank. Each CSV file is one experiment in which a fault is
-introduced (valve closing, rotor imbalance, leaks, cavitation, ...). Rows are 1-second readings of 8 sensors
-plus two label columns, `anomaly` (0 normal, 1 anomaly) and `changepoint`. The label columns are used only
-for evaluation and never fed to the model.
-
-| Item | Value |
+| | |
 |---|---|
-| Labeled experiments | 34 (valve1: 16, valve2: 4, other: 14) + 1 anomaly-free recording |
-| Labeled rows | 37,401 (65.1 % normal, 34.9 % anomaly) |
-| Sensors | Accelerometer1RMS, Accelerometer2RMS, Current, Pressure, Temperature, Thermocouple, Voltage, Volume Flow RateRMS |
-| Missing values / duplicates within an experiment | 0 / 0 |
-| License | GPL-3.0 (data repository) |
+| Recordings with labels | 34 (+ 1 recording with no fault at all) |
+| Rows | 37,401 seconds |
+| Sensors (8) | 2 accelerometers (vibration), current, pressure, 2 temperatures, voltage, flow rate |
+| Labels | `anomaly`: 1 = fault, 0 = normal (used only for fine-tuning and grading, never as model input) |
+| License | GPL-3.0 |
 
-**EDA observations (from the notebook, Section 2):**
+## 2. Exploring the data (EDA)
 
-1. **Class distribution.** 34.9 % of rows are anomalous. That is imbalanced, but far less than typical
-   anomaly data, because every experiment contains one deliberately induced fault lasting several minutes.
-   Per experiment the anomaly share ranges from 25 % to 49 %.
-2. **Sensor relationships.** The two accelerometers are perfectly correlated (r = 1.00), so the model
-   effectively sees 7 independent signals. Flow rate correlates with the accelerometers at r = 0.96 under
-   normal operation but only r = 0.80 during anomalies. Pressure and Voltage are nearly uncorrelated with everything.
-3. **Anomaly duration.** There are exactly 34 anomaly segments, one per experiment, each 188 to 586 s long.
-   There are no isolated point anomalies: these are collective anomalies, which suits a context-based model.
+1. **The data is clean.** No missing values and no duplicate rows.
+2. **About 35 % of all seconds are faults.** Every recording has exactly one fault block, 3 to 10 minutes long.
+   So we are looking for long unusual *periods*, not single strange values.
+3. **Sensors move together, and the links change during a fault.** The two accelerometers are identical (r = 1.00).
+   Flow rate follows vibration closely in normal seconds (r = 0.96) but less during faults (r = 0.80).
+   So a good model should read all sensors together.
 
-Figures: `results/figures/fig1_sensors_over_time.png`, `fig2_class_distribution.png`, `fig3_correlation_heatmap.png`.
+Figures: `fig1_sensors_over_time.png`, `fig2_class_distribution.png`, `fig3_correlation_heatmap.png`.
 
-## Model: Time-RCD
+## 3. Preparing the data
 
-[Time-RCD](https://huggingface.co/thu-sail-lab/Time-RCD) (Lan et al., 2025, ICML 2026) is a zero-shot
-foundation model for time-series anomaly detection, pretrained on synthetic data. Given a series of shape
-(T, C) it returns one anomaly score in [0, 1] per time step, based on how much each patch deviates from its
-surrounding context ("relative context discrepancy"). No training or fine-tuning on SKAB is performed.
-License: Apache-2.0. Checkpoint used: `best_model/pretrain_checkpoint_best_multi.pth` (445 MB, downloaded
-automatically on first run).
+1. **Sort** each recording by time.
+2. **Keep only the 8 sensor columns** as model input. The label columns are hidden from the models.
+3. **Scale** every sensor inside each recording to mean 0 and standard deviation 1, because the sensors use very
+   different units (temperature about 70, current about 2).
+4. **Split by whole recording:** 10 recordings for training, 24 for testing. We do not split random rows, because
+   two neighbouring seconds are almost the same and the test would then be far too easy.
 
-The alternative candidate `nvidia/Kumo-Anomaly` was not used because it requires its own inference library.
+## 4. Three models, one fair test
 
-## Method
-
-1. **Split by experiment, fixed before any model run.** 10 validation experiments
-   (valve1 0–4, valve2 0, other 1/5/10/13, one of each "other" fault type) are used only to choose the threshold.
-   The remaining 24 experiments are the test set. No training set is needed because nothing is trained.
-2. **Scoring.** Each experiment is passed to the multivariate model as a (T, 8) array of raw sensor values.
-   The model does its own normalisation internally.
-3. **Rank normalisation (label-free).** Time-RCD scores are relative to each recording's own context, so the
-   same fault can score 0.9 in one file and 0.05 in another. Each experiment's scores are therefore converted
-   to within-experiment percentile ranks before thresholding. This raised pooled test ROC-AUC from 0.68 to 0.74.
-4. **Threshold.** The rank that maximises F1 on the pooled validation rows (0.310) is frozen and applied to the test set.
-5. **Evaluation.** Accuracy, precision, recall, F1, ROC-AUC and a confusion matrix on the test rows, plus
-   per-experiment metrics (`results/evaluation.csv`).
-
-## Results
-
-Test set: 24 experiments, 26,516 rows.
-
-| Metric | Value |
+| Model | What it is |
 |---|---|
-| Accuracy | 0.587 |
-| Precision | 0.456 |
-| Recall | 0.895 |
-| F1 | 0.604 |
-| ROC-AUC (pooled, rank scores) | 0.737 |
-| Per-experiment ROC-AUC | median 0.79, range 0.21 – 1.00 |
-| Confusion matrix [[TN, FP], [FN, TP]] | [[7224, 9961], [982, 8349]] |
-| Trivial "everything is anomaly" F1 (reference) | 0.521 |
+| **Isolation Forest** | Classic machine learning (scikit-learn), the baseline. It learns what "normal" looks like from the fault-free recording. |
+| **Time-RCD zero-shot** | The pretrained Hugging Face model, used as it is. It has never seen our data. For every moment it asks: *does this fit with what happens around it?* and returns a score from 0 (normal) to 1 (very unusual). |
+| **Time-RCD fine-tuned** (bonus) | The same model, trained a little more on the 10 training recordings and their fault labels: 10 epochs, learning rate 1e-4, about 6 minutes on a CPU. The test recordings are never used for training. |
 
-The threshold that maximises F1 favours recall heavily. The model-tutorial method (raw score above the 95 %
-quantile of the anomaly-free recording) gives the opposite trade-off: precision 0.57, recall 0.25, F1 0.34.
+All three models are graded on the same 24 test recordings, with the same rule for turning scores into alarms:
+inside each recording the scores are turned into percentiles, and a second gets an alarm if its percentile is above a
+cut-off. Each model's cut-off is picked on the training recordings only.
 
-**Baseline comparison** (mean per-experiment ROC-AUC over all 34 experiments, threshold-free):
+**Metrics in plain words:** *precision* = of all alarms, how many were real faults; *recall* = of all fault seconds,
+how many were caught; *F1* = one number that balances the two; *ROC-AUC* = how well the scores separate faults from
+normal seconds without any cut-off (0.5 = guessing, 1.0 = perfect), measured per recording and then averaged.
 
-| Method | Mean AUC | Median AUC | Experiments with AUC < 0.6 |
-|---|---|---|---|
-| Time-RCD multivariate (used) | **0.709** | 0.776 | 11 / 34 |
-| Time-RCD multivariate, 120 s moving average | 0.710 | 0.798 | 12 / 34 |
-| Time-RCD univariate, mean of 8 channels | 0.651 | 0.668 | 14 / 34 |
-| Isolation Forest, fit on anomaly-free data | 0.555 | 0.509 | 27 / 34 |
-| Rolling z-score, 60 s window | 0.545 | 0.545 | 32 / 34 |
+## 5. Results (24 test recordings, 26,516 seconds)
 
-**Five representative test examples** (notebook Section 5):
+| Model | Precision | Recall | F1 | Accuracy | ROC-AUC | Test recordings with ROC-AUC > 0.7 |
+|---|---|---|---|---|---|---|
+| Isolation Forest | 0.40 | 0.79 | 0.53 | 0.50 | 0.61 | 3 of 24 |
+| Time-RCD zero-shot | 0.46 | 0.90 | 0.60 | 0.59 | 0.74 | 15 of 24 |
+| **Time-RCD fine-tuned** | **0.90** | **0.90** | **0.90** | **0.93** | **0.97** | **24 of 24** |
 
-| Case | Experiment, time | Flow | Temp | Label | Score | Rank | Predicted |
-|---|---|---|---|---|---|---|---|
-| Normal, correctly normal | valve1/10, 13:34:39 | 32.0 | 67.7 | 0 | 0.004 | 0.146 | normal |
-| Anomaly, detected | other/8, 17:24:13 | 127.3 | 88.1 | 1 | 1.000 | 1.000 | anomaly |
-| Anomaly, missed | other/4, 17:20:44 | 76.0 | 87.6 | 1 | 0.012 | 0.001 | normal |
-| Normal, false alarm | other/14, 19:32:19 | 2.8 | 86.5 | 0 | 1.000 | 1.000 | anomaly |
-| Prolonged anomaly, detected | other/11, from 18:20:42 | 128.0 | 84.8 | 1 | 0.159 | 0.877 | anomaly, 451 consecutive seconds |
+For reference, calling every second a fault gives F1 = 0.52.
 
-The false alarm in other/14 is instructive: flow is 2.8 (pump essentially off) at the very start of the
-recording, before the labeled fault. The model treats the start-up transient as the most unusual event in the file.
+- The pretrained model beats the classic baseline even without any training.
+- Fine-tuning made the biggest difference: precision doubled (0.46 → 0.90), so there are far fewer false alarms.
 
-## Error analysis, strengths and weaknesses
+### Sanity check: did the model learn the faults, or just the clock?
+
+In SKAB almost every fault starts about 570 seconds into the recording. A **clock-only guess** (for each second, how
+often was it a fault in the training recordings?) never looks at a sensor, yet it gets ROC-AUC 0.95! So we cut the
+first 5 minutes off every test recording, which makes every fault come 5 minutes earlier:
+
+| Mean ROC-AUC on the 24 test recordings | Full recordings | First 5 minutes cut |
+|---|---|---|
+| Clock-only guess | 0.95 | 0.53 (no better than guessing) |
+| Time-RCD fine-tuned | 0.97 | 0.93 |
+
+The clock guess breaks, but the fine-tuned model still works. It learned what faults look like, not when they happen.
+
+### Five example seconds (fine-tuned model, notebook step 8)
+
+| Case | Recording, time | Flow | Real | Score | Alarm? |
+|---|---|---|---|---|---|
+| Normal, no alarm (correct) | other/2, 16:29:17 | 75.0 | normal | 0.03 | no |
+| Fault, alarm (caught) | other/8, 17:24:13 | 127.3 | fault | 1.00 | yes |
+| Fault, no alarm (missed) | valve1/7, 12:51:32 | 32.0 | fault | 0.01 | no |
+| Normal, alarm (false alarm) | other/14, 19:32:19 | 2.8 | normal | 1.00 | yes |
+| Start of a long fault, caught | valve1/9, 13:24:40 | 32.0 | fault | 0.22 | yes (400 of 402 fault seconds caught) |
+
+- **The missed fault** is in the last seconds of the fault in valve1/7: the flow is already back at 32, exactly like
+  normal running, so the sensors no longer show anything unusual.
+- **The false alarm** is the very last second of other/14: the flow is 2.8 because the pump is being switched off.
+  The model finds this very unusual, but the label says normal.
+- **Example 5:** in valve1/9 the alarm starts 2 seconds after the fault begins and the model catches 400 of the 402
+  fault seconds.
+
+## 6. Strengths and weaknesses
 
 **Strengths**
-
-- Works zero-shot: no labels, no training, one function call per experiment, about 6 s per file on CPU.
-- Detects the long fault periods in most "other" experiments (rotor imbalance, leaks, water-level changes)
-  with ROC-AUC 0.87 to 1.00 and handles all 8 sensors jointly.
-- Substantially better than classical label-free baselines on the same data.
+- Works without any training (zero-shot) and still beats the classic baseline.
+- A little labeled data goes a long way: 10 recordings and about 6 minutes of CPU time took F1 from 0.60 to 0.90.
+- Reads all 8 sensors together, and passed the clock test.
 
 **Weaknesses**
+- Zero-shot alone gives many false alarms (precision 0.46) and does badly on some recordings (worst ROC-AUC 0.21).
+- Fine-tuning needs labeled faults, which are rare in a real factory.
+- SKAB is small (34 recordings) and its faults happen at almost the same time, so it is easier than real life.
+  The fine-tuned model drops a little (0.97 → 0.93) when the timing changes.
+- Scores are not on the same scale in different recordings, so we needed per-recording percentiles.
 
-- **Reliability varies per experiment.** 11 of 34 experiments have ROC-AUC below 0.6; the worst (valve2/3) is 0.21.
-- **Subtle faults are missed.** The valve experiments often change the flow rate by only about 1 unit; the model
-  under-reacts to these while reacting strongly to the rig settling during the first minutes of a recording.
-- **Score scale is not comparable across recordings**, which forces a per-recording rank normalisation and
-  makes a single operational threshold hard to set.
-- **Precision is low (0.46)** at the F1-optimal threshold; a deployment would need a stricter threshold and
-  would then miss most faults.
-- Domain gap: the model is pretrained on synthetic series; SKAB is a small physical rig with step-like,
-  low-resolution sensors (Pressure and Flow take only a few discrete values).
+**Next steps**
+- Test on recordings where faults happen at random times.
+- Fine-tune on random cuts of each recording so that timing can never help.
+- Use more recordings with k-fold cross-validation, and compare a second pretrained model (for example MOMENT or Chronos).
 
-**Tried and did not help** (see `results/comparison.csv`): a 120 s moving average on the scores, ignoring the
-first 120 s of each recording, and the univariate checkpoint averaged over channels. Flow rate alone scored as
-well as the multivariate model, but selecting a channel after seeing results would be test-set leakage, so it
-was not adopted.
-
-**Possible improvements**
-
-- Calibrate a per-experiment threshold from a short known-normal warm-up window instead of a global rank.
-- Combine Time-RCD with a sensor-specific rule on flow rate for the valve faults.
-- Fine-tune Time-RCD or a lighter model on a few SKAB experiments, with proper experiment-level cross-validation.
-- Compare against a second pretrained model (e.g. NVIDIA Kumo-Anomaly) under identical splits.
-
-## Technical difficulties and limitations
-
-- Time-RCD is a young model (about 100 downloads at the time of writing). Its Transformers wrapper only
-  supports univariate input, so the official `time_rcd` package from GitHub is used for multivariate inference.
-- The first run downloads a 445 MB checkpoint. On Windows, `huggingface_hub` warns about missing symlink
-  support; this is harmless.
-- Only 34 short experiments exist, so all metrics have wide uncertainty. No fine-tuning was attempted.
-
-## Reproduction
+## 7. How to run it
 
 ```bash
 git clone https://github.com/asiralabi/skab-timercd-anomaly-detection.git
 cd skab-timercd-anomaly-detection
-pip install -r requirements.txt            # installs time-rcd from GitHub; Python 3.10+ (tested on 3.14)
+pip install -r requirements.txt
 jupyter nbconvert --to notebook --execute --inplace notebook/project.ipynb
 ```
 
-Or open `notebook/project.ipynb` in Jupyter and run all cells. The notebook downloads the data, downloads the
-model checkpoint, scores all experiments (about 5 min CPU for the multivariate model, about 10 min for the
-univariate side experiment), and writes `results/evaluation.csv`, `results/comparison.csv` and the figures.
-Everything runs on CPU; no GPU is required.
+Or open `notebook/project.ipynb` in Jupyter or VS Code and click **Run All**. The notebook downloads the data and the
+model (445 MB) by itself. It takes about 10 minutes on a laptop CPU; no GPU is needed. Tested with Python 3.14 on
+Windows 11.
 
 ## References
 
-- Lan, T. et al. (2025). *Towards Foundation Models for Zero-Shot Time Series Anomaly Detection: Leveraging
-  Synthetic Data and Relative Context Discrepancy.* arXiv:2509.21190. Model: https://huggingface.co/thu-sail-lab/Time-RCD
+- Lan, T. et al. (2025). *Towards Foundation Models for Zero-Shot Time Series Anomaly Detection: Leveraging Synthetic
+  Data and Relative Context Discrepancy.* arXiv:2509.21190. Model: https://huggingface.co/thu-sail-lab/Time-RCD
 - Katser, I. D. & Kozitsin, V. O. (2020). *Skoltech Anomaly Benchmark (SKAB).* https://github.com/waico/SKAB

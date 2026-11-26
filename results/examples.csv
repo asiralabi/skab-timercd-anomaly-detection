@@ -1,0 +1,6 @@
+,recording,datetime,Volume Flow RateRMS,Temperature,anomaly,score,percentile,alarm
+"1. normal, no alarm (correct)",other/2,2020-03-01 16:29:17,74.9813,88.8747,0.0,0.028,0.308,0
+"2. fault, alarm (caught)",other/8,2020-02-08 17:24:13,127.317,88.1174,1.0,1.0,1.0,1
+"3. fault, no alarm (missed)",valve1/7,2020-03-09 12:51:32,32.0,70.1744,1.0,0.008,0.513,0
+"4. normal, alarm (false alarm)",other/14,2020-02-08 19:32:19,2.76765,86.4799,0.0,1.0,1.0,1
+"5. start of a long fault, caught",valve1/9,2020-03-09 13:24:40,32.0,69.7256,1.0,0.224,0.652,1

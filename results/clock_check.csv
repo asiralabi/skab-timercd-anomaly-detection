@@ -1,0 +1,5 @@
+,mean ROC-AUC on the 24 test recordings
+Clock only: full recordings,0.948
+Clock only: first 5 min cut,0.533
+Fine-tuned: full recordings,0.968
+Fine-tuned: first 5 min cut,0.928
